@@ -34,3 +34,5 @@ ignition/deployments
 dist
 coverage
 typechain-types
+frontend/src/contract.tsx
+.gitignore

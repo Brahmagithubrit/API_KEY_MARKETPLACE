@@ -22,3 +22,14 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+node_modules
+.env
+cache
+artifacts
+ignition/deployments
+dist
+coverage
+typechain-types
+frontend/node_modules
+frontend/dist
+frontend/src/contract.tsx

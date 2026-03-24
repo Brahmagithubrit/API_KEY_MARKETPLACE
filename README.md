@@ -23,7 +23,7 @@ npx hardhat node
 npx hardhat ignition deploy ignition/modules/deploy.ts --network localhost
 
 ### Testnet Deployment (Sepolia)
-npx hardhat ignition deploy ignition/modules/deploy.ts --network localhost
+npx hardhat ignition deploy ignition/modules/deploy.ts --network sepolia
 
 ## Contract
 APIRegistry.sol handles:

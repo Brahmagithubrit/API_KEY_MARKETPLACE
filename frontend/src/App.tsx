@@ -3,14 +3,26 @@ import {
   useConnect,
   useDisconnect,
   useWriteContract,
-  useReadContract,
   useConfig,
 } from "wagmi";
-import { waitForTransactionReceipt } from "viem/actions";
+import { getPublicClient, waitForTransactionReceipt } from "wagmi/actions";
 import { contractAddress, abi } from "./config/contract";
-import { parseEther } from "viem";
+import { parseEther, formatEther } from "viem";
 import { useEffect, useState } from "react";
-import "./App.css";
+
+interface Api {
+  id: bigint;
+  owner: string;
+  endpoint: string;
+  pricePerCall: bigint;
+  totalEarned: bigint;
+  active: boolean;
+}
+
+
+function Toast({ msg, type }: { msg: string; type: "success" | "error" }) {
+  return <div className={`toast ${type}`}>{msg}</div>;
+}
 
 function App() {
   const { address, isConnected } = useAccount();
@@ -21,372 +33,416 @@ function App() {
 
   const [endpoint, setEndpoint] = useState("");
   const [price, setPrice] = useState("");
-  const [apis, setApis] = useState<any[]>([]);
-  const [creditsMap, setCreditsMap] = useState<Record<number, number>>({});
+  const [apis, setApis] = useState<Api[]>([]);
+  const [creditsMap, setCreditsMap] = useState<Record<string, bigint>>({});
+  const [buyQtyMap, setBuyQtyMap] = useState<Record<string, string>>({});
   const [activePanel, setActivePanel] = useState<"user" | "dev">("user");
+  const [loading, setLoading] = useState(false);
+  const [statusMsg, setStatusMsg] = useState("Ready");
+  const [toast, setToast] = useState<{ msg: string; type: "success" | "error" } | null>(null);
 
-  const { data: counter } = useReadContract({
-    address: contractAddress,
-    abi,
-    functionName: "counter",
-  });
+  const showToast = (msg: string, type: "success" | "error") => {
+    setToast({ msg, type });
+    setTimeout(() => setToast(null), 3500);
+  };
 
   const fetchApis = async () => {
-    if (!counter) return;
-    const list = [];
-    for (let i = 1; i <= Number(counter); i++) {
-      try {
-        const api: any = await config.getPublicClient().readContract({
-          address: contractAddress,
-          abi,
-          functionName: "apis",
-          args: [i],
-        });
-        list.push(api);
-      } catch {}
+    try {
+      const client = getPublicClient(config);
+      if (!client) return;
+
+      const currentCounter = await client.readContract({
+        address: contractAddress,
+        abi,
+        functionName: "counter",
+      }) as bigint;
+
+      const list: Api[] = [];
+      for (let i = 1n; i <= currentCounter; i++) {
+        try {
+          const api = await client.readContract({
+            address: contractAddress,
+            abi,
+            functionName: "apis",
+            args: [i],
+          }) as [bigint, string, string, bigint, bigint, boolean];
+
+          list.push({
+            id:           api[0],
+            owner:        api[1],
+            endpoint:     api[2],
+            pricePerCall: api[3],
+            totalEarned:  api[4],
+            active:       api[5],
+          });
+        } catch (err) {
+          console.error("Failed to fetch api", i, err);
+        }
+      }
+      setApis(list);
+    } catch (err) {
+      console.error("fetchApis error:", err);
     }
-    setApis(list);
   };
 
   const fetchCredits = async () => {
     if (!address || apis.length === 0) return;
-    const map: Record<number, number> = {};
-    for (let api of apis) {
-      try {
-        const credit: any = await config.getPublicClient().readContract({
-          address: contractAddress,
-          abi,
-          functionName: "credits",
-          args: [address, api.id],
-        });
-        map[Number(api.id)] = Number(credit);
-      } catch {}
+    try {
+      const client = getPublicClient(config);
+      if (!client) return;
+
+      const map: Record<string, bigint> = {};
+      for (const api of apis) {
+        try {
+          const credit = await client.readContract({
+            address: contractAddress,
+            abi,
+            functionName: "credits",
+            args: [address, api.id],
+          }) as bigint;
+          map[api.id.toString()] = credit;
+        } catch (err) {
+          console.error("fetchCredits error for api", api.id, err);
+        }
+      }
+      setCreditsMap(map);
+    } catch (err) {
+      console.error("fetchCredits error:", err);
     }
-    setCreditsMap(map);
   };
 
-  useEffect(() => {
-    fetchApis();
-  }, [counter]);
-
-  useEffect(() => {
-    fetchCredits();
-  }, [apis, address]);
+  useEffect(() => { fetchApis(); }, []);
+  useEffect(() => { fetchCredits(); }, [apis, address]);
 
   const registerApi = async () => {
+    if (!endpoint || !price) return;
     try {
+      setLoading(true);
+      setStatusMsg("Awaiting MetaMask confirmation…");
+
       const hash = await writeContractAsync({
         address: contractAddress,
         abi,
         functionName: "registerApi",
         args: [endpoint, parseEther(price)],
       });
+
+      setStatusMsg("Transaction submitted, waiting for receipt…");
       await waitForTransactionReceipt(config, { hash });
+
+      setStatusMsg("Confirmed! Refreshing…");
+      await fetchApis();
       setEndpoint("");
       setPrice("");
-      fetchApis();
-    } catch (err) {
+      showToast("API registered successfully!", "success");
+    } catch (err: any) {
       console.error(err);
+      showToast(err?.shortMessage || "Transaction failed", "error");
+    } finally {
+      setLoading(false);
+      setStatusMsg("Ready");
     }
   };
 
-  const buyCredits = async (id: number, pricePerCall: bigint) => {
+  const buyCredits = async (api: Api) => {
+    const qty = BigInt(buyQtyMap[api.id.toString()] || "1");
+    if (qty <= 0n) return;
     try {
+      setLoading(true);
+      setStatusMsg("Awaiting MetaMask confirmation…");
+
+      const totalValue = api.pricePerCall * qty;
+
       const hash = await writeContractAsync({
         address: contractAddress,
         abi,
         functionName: "buyCredits",
-        args: [id],
-        value: pricePerCall,
+        args: [api.id],
+        value: totalValue,
       });
+
+      setStatusMsg("Transaction submitted, waiting for receipt…");
       await waitForTransactionReceipt(config, { hash });
-      fetchCredits();
-    } catch (err) {
+
+      await fetchCredits();
+      await fetchApis();
+      showToast(`Bought ${qty} credit(s)!`, "success");
+    } catch (err: any) {
       console.error(err);
+      showToast(err?.shortMessage || "Transaction failed", "error");
+    } finally {
+      setLoading(false);
+      setStatusMsg("Ready");
     }
   };
 
-  const useCredit = async (id: number) => {
+  const useCredit = async (api: Api) => {
     try {
+      setLoading(true);
+      setStatusMsg("Awaiting MetaMask confirmation…");
+
       const hash = await writeContractAsync({
         address: contractAddress,
         abi,
         functionName: "useCredit",
-        args: [id],
+        args: [api.id],
       });
+
+      setStatusMsg("Transaction submitted, waiting for receipt…");
       await waitForTransactionReceipt(config, { hash });
-      fetchCredits();
-    } catch (err) {
+
+      await fetchCredits();
+      await fetchApis();
+      showToast("Credit used!", "success");
+    } catch (err: any) {
       console.error(err);
+      showToast(err?.shortMessage || "Transaction failed", "error");
+    } finally {
+      setLoading(false);
+      setStatusMsg("Ready");
     }
   };
 
-  const withdraw = async (id: number) => {
+  const withdraw = async (api: Api) => {
     try {
+      setLoading(true);
+      setStatusMsg("Awaiting MetaMask confirmation…");
+
       const hash = await writeContractAsync({
         address: contractAddress,
         abi,
         functionName: "withdraw",
-        args: [id],
+        args: [api.id],
       });
+
+      setStatusMsg("Transaction submitted, waiting for receipt…");
       await waitForTransactionReceipt(config, { hash });
-      fetchApis();
-    } catch (err) {
+
+      await fetchApis();
+      showToast("Withdrawn successfully!", "success");
+    } catch (err: any) {
       console.error(err);
+      showToast(err?.shortMessage || "Transaction failed", "error");
+    } finally {
+      setLoading(false);
+      setStatusMsg("Ready");
     }
   };
 
+  const myApis = apis.filter(
+    (api) => api.owner.toLowerCase() === address?.toLowerCase()
+  );
+
   return (
-    <div className="app-root">
-      {/* Background grid */}
-      <div className="bg-grid" />
-      <div className="bg-glow" />
+    <>
+      <style>{styles}</style>
 
-      {/* Header */}
-      <header className="header">
-        <div className="header-brand">
-          <span className="header-logo">⬡</span>
-          <span className="header-title">APIChain</span>
-          <span className="header-tagline">Decentralized API Marketplace</span>
-        </div>
+      {toast && <Toast msg={toast.msg} type={toast.type} />}
 
-        <div className="header-wallet">
-          {!isConnected ? (
-            <button
-              className="btn btn-connect"
-              onClick={() => connect({ connector: connectors[0] })}
-            >
-              <span className="btn-dot" />
-              Connect Wallet
-            </button>
-          ) : (
-            <div className="wallet-info">
-              <span className="wallet-dot" />
-              <span className="wallet-address">
-                {address?.slice(0, 6)}…{address?.slice(-4)}
+      <div className="app">
+        <header className="header">
+          <div className="logo">API<span>Chain</span></div>
+          {isConnected && address && (
+            <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+              <span className="address-pill">
+                {address.slice(0, 6)}…{address.slice(-4)}
               </span>
-              <button className="btn btn-disconnect" onClick={() => disconnect()}>
+              <button className="btn btn-ghost" onClick={() => disconnect()}>
                 Disconnect
               </button>
             </div>
           )}
-        </div>
-      </header>
+        </header>
 
-      {/* Main */}
-      <main className="main">
         {!isConnected ? (
           <div className="connect-screen">
-            <div className="connect-icon">⬡</div>
-            <h2 className="connect-heading">Connect your wallet to begin</h2>
-            <p className="connect-sub">
-              Access the decentralized API marketplace — buy, sell, and manage
-              API credits on-chain.
-            </p>
+            <div style={{ fontSize: 48 }}>⬡</div>
+            <h2>Decentralised<br />API Marketplace</h2>
+            <p>Register APIs, buy credits, and monetise your endpoints on-chain.</p>
             <button
-              className="btn btn-connect btn-connect-lg"
+              className="btn btn-primary"
+              style={{ padding: "12px 32px", fontSize: 14 }}
               onClick={() => connect({ connector: connectors[0] })}
             >
-              <span className="btn-dot" />
               Connect Wallet
             </button>
           </div>
         ) : (
           <>
-            {/* Panel Toggle */}
-            <div className="panel-toggle">
+            <div className="tabs">
               <button
-                className={`toggle-btn ${activePanel === "user" ? "toggle-btn--active" : ""}`}
+                className={`tab ${activePanel === "user" ? "active" : ""}`}
                 onClick={() => setActivePanel("user")}
               >
-                <span className="toggle-icon">◈</span> User Panel
+                Browse APIs
               </button>
               <button
-                className={`toggle-btn ${activePanel === "dev" ? "toggle-btn--active" : ""}`}
+                className={`tab ${activePanel === "dev" ? "active" : ""}`}
                 onClick={() => setActivePanel("dev")}
               >
-                <span className="toggle-icon">⬡</span> Dev Panel
+                My APIs
               </button>
             </div>
 
-            {/* ── USER PANEL ── */}
-            {activePanel === "user" && (
-              <section className="panel panel--user">
-                <div className="panel-header">
-                  <h2 className="panel-title">
-                    <span className="panel-title-accent">◈</span> Available APIs
-                  </h2>
-                  <span className="panel-badge">{apis.length} registered</span>
+            {activePanel === "dev" && (
+              <>
+                <div className="register-card">
+                  <h3>Register New API</h3>
+                  <div className="form-row">
+                    <input
+                      placeholder="https://api.yourservice.com/v1/endpoint"
+                      value={endpoint}
+                      onChange={(e) => setEndpoint(e.target.value)}
+                    />
+                    <input
+                      placeholder="Price (ETH)"
+                      value={price}
+                      onChange={(e) => setPrice(e.target.value)}
+                      style={{ textAlign: "right" }}
+                    />
+                    <button
+                      className="btn btn-primary"
+                      onClick={registerApi}
+                      disabled={loading || !endpoint || !price}
+                    >
+                      {loading ? "…" : "Register"}
+                    </button>
+                  </div>
                 </div>
 
-                {apis.length === 0 ? (
-                  <div className="empty-state">
-                    <span className="empty-icon">◌</span>
-                    <p>No APIs registered yet.</p>
-                  </div>
-                ) : (
-                  <div className="api-grid">
-                    {apis.map((api) => {
-                      const userCredits = creditsMap[Number(api.id)] || 0;
-                      return (
-                        <div className="api-card" key={Number(api.id)}>
-                          <div className="api-card-header">
-                            <span className="api-id">#{Number(api.id)}</span>
-                            <span className="api-price">
-                              {Number(api.pricePerCall) / 1e18} ETH
-                              <span className="api-price-label"> / call</span>
-                            </span>
-                          </div>
-
+                <p className="section-heading">Your Registered APIs ({myApis.length})</p>
+                <div className="api-grid">
+                  {myApis.length === 0 ? (
+                    <div className="empty">
+                      <div className="empty-icon">📭</div>
+                      You haven't registered any APIs yet.
+                    </div>
+                  ) : (
+                    myApis.map((api) => (
+                      <div key={api.id.toString()} className="api-card owner">
+                        <div className="api-info">
                           <div className="api-endpoint">{api.endpoint}</div>
-
                           <div className="api-meta">
-                            <div className="api-meta-row">
-                              <span className="meta-label">Owner</span>
-                              <span className="meta-value meta-value--addr">
-                                {api.owner.slice(0, 6)}…{api.owner.slice(-4)}
+                            <span className="meta-chip price">
+                              {formatEther(api.pricePerCall)} ETH / call
+                            </span>
+                            <span className="meta-chip earned">
+                              ⬡ {formatEther(api.totalEarned)} ETH earned
+                            </span>
+                            {!api.active && (
+                              <span className="meta-chip inactive-tag">Inactive</span>
+                            )}
+                            <span className="meta-chip owner-tag">Owner</span>
+                          </div>
+                        </div>
+                        <div className="api-actions">
+                          <button
+                            className="btn btn-warn"
+                            onClick={() => withdraw(api)}
+                            disabled={loading || api.totalEarned === 0n}
+                            title={api.totalEarned === 0n ? "Nothing to withdraw" : ""}
+                          >
+                            Withdraw
+                          </button>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </>
+            )}
+
+            {activePanel === "user" && (
+              <>
+                <p className="section-heading">Available APIs ({apis.length})</p>
+                <div className="api-grid">
+                  {apis.length === 0 ? (
+                    <div className="empty">
+                      <div className="empty-icon">🔍</div>
+                      No APIs registered yet.
+                    </div>
+                  ) : (
+                    apis.map((api) => {
+                      const userCredits = creditsMap[api.id.toString()] ?? 0n;
+                      const isOwner = api.owner.toLowerCase() === address?.toLowerCase();
+                      const qty = buyQtyMap[api.id.toString()] || "1";
+
+                      return (
+                        <div
+                          key={api.id.toString()}
+                          className={`api-card ${isOwner ? "owner" : ""} ${!api.active ? "inactive" : ""}`}
+                        >
+                          <div className="api-info">
+                            <div className="api-endpoint">{api.endpoint}</div>
+                            <div className="api-meta">
+                              <span className="meta-chip price">
+                                {formatEther(api.pricePerCall)} ETH / call
                               </span>
-                            </div>
-                            <div className="api-meta-row">
-                              <span className="meta-label">Total Earned</span>
-                              <span className="meta-value">
-                                {Number(api.totalEarned) / 1e18} ETH
+                              <span className="meta-chip credits">
+                                {userCredits.toString()} credit{userCredits !== 1n ? "s" : ""}
                               </span>
-                            </div>
-                            <div className="api-meta-row">
-                              <span className="meta-label">Your Credits</span>
-                              <span className={`meta-value credits-badge ${userCredits > 0 ? "credits-badge--active" : ""}`}>
-                                {userCredits}
-                              </span>
+                              {isOwner && (
+                                <span className="meta-chip owner-tag">You own this</span>
+                              )}
+                              {!api.active && (
+                                <span className="meta-chip inactive-tag">Inactive</span>
+                              )}
                             </div>
                           </div>
 
-                          <div className="api-card-actions">
-                            <button
-                              className="btn btn-buy"
-                              onClick={() => buyCredits(Number(api.id), api.pricePerCall)}
-                            >
-                              Buy Credit
-                            </button>
-                            {userCredits > 0 && (
+                          <div className="api-actions">
+                            {api.active && (
+                              <div className="buy-row">
+                                <input
+                                  className="buy-qty"
+                                  type="number"
+                                  min="1"
+                                  value={qty}
+                                  onChange={(e) =>
+                                    setBuyQtyMap((prev) => ({
+                                      ...prev,
+                                      [api.id.toString()]: e.target.value,
+                                    }))
+                                  }
+                                  title="Number of credits to buy"
+                                />
+                                <button
+                                  className="btn btn-primary"
+                                  onClick={() => buyCredits(api)}
+                                  disabled={loading}
+                                >
+                                  Buy
+                                </button>
+                              </div>
+                            )}
+
+                            {userCredits > 0n && api.active && (
                               <button
                                 className="btn btn-use"
-                                onClick={() => useCredit(Number(api.id))}
+                                onClick={() => useCredit(api)}
+                                disabled={loading}
                               >
-                                Use Credit
+                                Use
                               </button>
                             )}
                           </div>
                         </div>
                       );
-                    })}
-                  </div>
-                )}
-              </section>
-            )}
-
-            {/* ── DEV PANEL ── */}
-            {activePanel === "dev" && (
-              <section className="panel panel--dev">
-                {/* Register */}
-                <div className="dev-block">
-                  <div className="panel-header">
-                    <h2 className="panel-title">
-                      <span className="panel-title-accent">⬡</span> Register API
-                    </h2>
-                  </div>
-
-                  <div className="register-form">
-                    <div className="form-group">
-                      <label className="form-label">API Endpoint</label>
-                      <input
-                        className="form-input"
-                        placeholder="https://your-api.com/endpoint"
-                        value={endpoint}
-                        onChange={(e) => setEndpoint(e.target.value)}
-                      />
-                    </div>
-                    <div className="form-group">
-                      <label className="form-label">Price per Call (ETH)</label>
-                      <input
-                        className="form-input"
-                        placeholder="0.001"
-                        value={price}
-                        onChange={(e) => setPrice(e.target.value)}
-                      />
-                    </div>
-                    <button className="btn btn-register" onClick={registerApi}>
-                      Register API
-                    </button>
-                  </div>
-                </div>
-
-                {/* Withdraw */}
-                <div className="dev-block">
-                  <div className="panel-header">
-                    <h2 className="panel-title">
-                      <span className="panel-title-accent">⬡</span> Your APIs & Withdraw
-                    </h2>
-                  </div>
-
-                  {apis.filter(
-                    (api) => api.owner.toLowerCase() === address?.toLowerCase()
-                  ).length === 0 ? (
-                    <div className="empty-state">
-                      <span className="empty-icon">◌</span>
-                      <p>You haven't registered any APIs yet.</p>
-                    </div>
-                  ) : (
-                    <div className="api-grid">
-                      {apis
-                        .filter(
-                          (api) =>
-                            api.owner.toLowerCase() === address?.toLowerCase()
-                        )
-                        .map((api) => (
-                          <div className="api-card api-card--owned" key={Number(api.id)}>
-                            <div className="api-card-header">
-                              <span className="api-id">#{Number(api.id)}</span>
-                              <span className="api-price">
-                                {Number(api.pricePerCall) / 1e18} ETH
-                                <span className="api-price-label"> / call</span>
-                              </span>
-                            </div>
-
-                            <div className="api-endpoint">{api.endpoint}</div>
-
-                            <div className="api-meta">
-                              <div className="api-meta-row">
-                                <span className="meta-label">Total Earned</span>
-                                <span className="meta-value earned-value">
-                                  {Number(api.totalEarned) / 1e18} ETH
-                                </span>
-                              </div>
-                            </div>
-
-                            <div className="api-card-actions">
-                              <button
-                                className="btn btn-withdraw"
-                                onClick={() => withdraw(Number(api.id))}
-                              >
-                                Withdraw Earnings
-                              </button>
-                            </div>
-                          </div>
-                        ))}
-                    </div>
+                    })
                   )}
                 </div>
-              </section>
+              </>
             )}
           </>
         )}
-      </main>
+      </div>
 
-      <footer className="footer">
-        <span>APIChain © 2025 — Powered by Ethereum</span>
-      </footer>
-    </div>
+      <div className="status-bar">
+        <div className={`status-dot ${loading ? "loading" : "ready"}`} />
+        {statusMsg}
+        {loading && <span style={{ marginLeft: "auto", color: "var(--accent)" }}>pending…</span>}
+      </div>
+    </>
   );
 }
 
